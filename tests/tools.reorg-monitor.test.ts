@@ -259,6 +259,7 @@ describe('reorg monitor detection logic', () => {
     expect(reorgs[0]!.height).toBe(99);
     expect(reorgs[0]!.old_header_hash).toBe('y'.repeat(64));
     expect(reorgs[0]!.new_header_hash).toBe(newHash99);
+    expect(reorgs[0]!.depth).toBe(1);
     expect(reorgs[0]!.blocks_from_peak).toBe(2);
   });
 
@@ -574,7 +575,7 @@ describe('reorg monitor detection logic', () => {
     expect(mockSendMail).toHaveBeenCalledOnce();
     const call = mockSendMail.mock.calls[0]![0] as { to: string; subject: string; text: string };
     expect(call.to).toBe('user@example.com');
-    expect(call.subject).toBe('Re-org of 1 block detected on Chia mainnet');
+    expect(call.subject).toBe('Re-org of depth 1 detected on Chia mainnet');
     expect(call.text).toContain('Peak height at detection: 501');
     expect(call.text).toContain('z'.repeat(64)); // new hash
     expect(call.text).toContain('x'.repeat(64)); // old hash in header + block record
@@ -630,7 +631,7 @@ describe('reorg monitor detection logic', () => {
   });
 
   it('does not alert a recipient when reorg depth is below their min_blocks', async () => {
-    // depth = peak(101) - reorged_height(99) = 2; recipient requires >= 3
+    // Single height change → depth 1; recipient requires >= 3, no alert.
     startMonitor({
       poll_interval_seconds: 60,
       lookback_blocks: 3,
@@ -661,7 +662,7 @@ describe('reorg monitor detection logic', () => {
   });
 
   it('alerts a recipient when reorg depth meets their min_blocks threshold', async () => {
-    // depth = peak(103) - reorged_height(100) = 3; recipient requires >= 3
+    // Three consecutive heights (99, 100, 101) all change in one poll → cluster depth = 3.
     startMonitor({
       poll_interval_seconds: 60,
       lookback_blocks: 4,
@@ -670,29 +671,73 @@ describe('reorg monitor detection logic', () => {
     });
     stopMonitor();
 
-    mockPeak(102, 'a'.repeat(64));
+    mockPeak(101, 'a'.repeat(64));
     mockBlockRecords([
+      makeBlockRecord(98, '0'.repeat(64)),
       makeBlockRecord(99, '1'.repeat(64)),
       makeBlockRecord(100, '2'.repeat(64)),
-      makeBlockRecord(101, '3'.repeat(64)),
-      makeBlockRecord(102, 'a'.repeat(64)),
+      makeBlockRecord(101, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
-    mockPeak(103, 'b'.repeat(64));
+    mockPeak(102, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORGED'.padEnd(64, '0')),
-      makeBlockRecord(101, '3'.repeat(64)),
-      makeBlockRecord(102, 'a'.repeat(64)),
-      makeBlockRecord(103, 'b'.repeat(64)),
+      makeBlockRecord(99, 'R1'.padEnd(64, '0')),
+      makeBlockRecord(100, 'R2'.padEnd(64, '0')),
+      makeBlockRecord(101, 'R3'.padEnd(64, '0')),
+      makeBlockRecord(102, 'b'.repeat(64)),
     ]);
     await _pollOnce();
     await Promise.resolve();
 
-    expect(getStatus().reorgs).toHaveLength(1);
+    expect(getStatus().reorgs).toHaveLength(3);
+    expect(getStatus().reorgs.every((r) => r.depth === 3)).toBe(true);
     expect(mockSendMail).toHaveBeenCalledOnce();
     const call = mockSendMail.mock.calls[0]![0] as { to: string };
     expect(call.to).toBe('strict@example.com');
+  });
+
+  it('reports the full depth of an 8-block re-org even when lookback=5', async () => {
+    // Build observations for heights 89..100 by walking the peak with lookback=5,
+    // then re-org heights 93..100 in one poll. With walk-back the monitor must
+    // detect all 8 changes as a single cluster of depth 8, even though the
+    // initial fetch only sees 5 heights.
+    startMonitor({ poll_interval_seconds: 60, lookback_blocks: 5, network: 'mainnet' });
+    stopMonitor();
+
+    const orig = (h: number) => `o${String(h).padStart(63, '0')}`;
+    const reorged = (h: number) => `r${String(h).padStart(63, '0')}`;
+
+    // Dynamic mock: returns whichever heights the monitor requests, and flips
+    // 93..100 to their `reorged` hashes once reorgActive is set.
+    let reorgActive = false;
+    mocks.get_block_records.mockImplementation(
+      (_agent: unknown, args: { start: number; end: number }) => {
+        const records: Array<{ height: number; header_hash: string }> = [];
+        for (let h = args.start; h < args.end; h++) {
+          const useReorg = reorgActive && h >= 93 && h <= 100;
+          records.push(makeBlockRecord(h, useReorg ? reorged(h) : orig(h)));
+        }
+        return Promise.resolve({ block_records: records });
+      }
+    );
+
+    for (let peak = 93; peak <= 100; peak++) {
+      mockPeak(peak, orig(peak));
+      await _pollOnce();
+    }
+    expect(getStatus().observations_count).toBe(12); // heights 89..100
+
+    reorgActive = true;
+    mockPeak(100, reorged(100));
+    await _pollOnce();
+
+    const { reorgs } = getStatus();
+    expect(reorgs).toHaveLength(8);
+    expect(reorgs.every((r) => r.depth === 8)).toBe(true);
+    expect(reorgs.map((r) => r.height).sort((a, b) => a - b)).toEqual([
+      93, 94, 95, 96, 97, 98, 99, 100,
+    ]);
   });
 
   it('sends only to recipients whose threshold is met', async () => {
@@ -765,14 +810,14 @@ describe('reorg monitor detection logic', () => {
     expect(mockSendMail).toHaveBeenCalledOnce();
     const call = mockSendMail.mock.calls[0]![0] as { to: string; subject: string; text: string };
     expect(call.to).toBe('user@example.com');
-    expect(call.subject).toBe('Re-org of 2 blocks detected on Chia mainnet');
+    expect(call.subject).toBe('Re-org of depth 2 detected on Chia mainnet');
     expect(call.text).toContain('Block 1:');
     expect(call.text).toContain('Block 2:');
     expect(call.text).toContain('REORG1'.padEnd(64, '0').toLowerCase());
     expect(call.text).toContain('REORG2'.padEnd(64, '0').toLowerCase());
   });
 
-  it('uses "Re-org of N blocks" subject even when affected blocks are not consecutive', async () => {
+  it('uses a cluster-count subject when re-orgs are non-consecutive', async () => {
     startMonitor({
       poll_interval_seconds: 60,
       lookback_blocks: 5,
@@ -806,7 +851,7 @@ describe('reorg monitor detection logic', () => {
     expect(getStatus().reorgs).toHaveLength(2);
     expect(mockSendMail).toHaveBeenCalledOnce();
     const call = mockSendMail.mock.calls[0]![0] as { subject: string };
-    expect(call.subject).toBe('Re-org of 2 blocks detected on Chia mainnet');
+    expect(call.subject).toBe('2 re-orgs detected on Chia mainnet (max depth 1)');
   });
 
   it('block labels are always sequential starting at 1 regardless of depth', async () => {
@@ -929,7 +974,7 @@ describe('reorg monitor detection logic', () => {
     const call = mockSendMail.mock.calls[0]![0] as { subject: string; text: string };
 
     // Consecutive heights 200 and 201 → batched as a single 2-block reorg.
-    expect(call.subject).toBe('Re-org of 2 blocks detected on Chia mainnet');
+    expect(call.subject).toBe('Re-org of depth 2 detected on Chia mainnet');
     expect(call.text).toContain('Block 1:');
     expect(call.text).toContain('Block 2:');
 
@@ -983,7 +1028,7 @@ describe('reorg monitor detection logic', () => {
     await Promise.resolve();
 
     const call = mockSendMail.mock.calls[0]![0] as { text: string };
-    expect(call.text).toContain('A 2-block re-org was detected on the Chia mainnet blockchain.');
+    expect(call.text).toContain('A re-org of depth 2 was detected on the Chia mainnet blockchain.');
   });
 
   it('email body opens with the non-consecutive intro when blocks are not adjacent', async () => {
@@ -1018,7 +1063,9 @@ describe('reorg monitor detection logic', () => {
     await Promise.resolve();
 
     const call = mockSendMail.mock.calls[0]![0] as { text: string };
-    expect(call.text).toContain('2 re-orgs were detected on the Chia mainnet blockchain.');
+    expect(call.text).toContain(
+      '2 re-orgs were detected on the Chia mainnet blockchain (max depth 1).'
+    );
   });
 
   // Email sender (from field)
@@ -1194,7 +1241,7 @@ describe('reorg monitor detection logic', () => {
   });
 
   it('three recipients — 3-block reorg → all three alerted', async () => {
-    // depth = peak(103) - reorged_height(100) = 3; min-3 threshold is exactly met
+    // Heights 100, 101, 102 all change in one poll → cluster depth = 3; min-3 met.
     startMonitor({
       poll_interval_seconds: 60,
       lookback_blocks: 4,
@@ -1214,15 +1261,16 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(103, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORGED'.padEnd(64, '0')), // depth = 103-100 = 3
-      makeBlockRecord(101, 'y'.repeat(64)),
-      makeBlockRecord(102, 'a'.repeat(64)),
+      makeBlockRecord(100, 'R1'.padEnd(64, '0')),
+      makeBlockRecord(101, 'R2'.padEnd(64, '0')),
+      makeBlockRecord(102, 'R3'.padEnd(64, '0')),
       makeBlockRecord(103, 'b'.repeat(64)),
     ]);
     await _pollOnce();
     await Promise.resolve();
 
-    expect(getStatus().reorgs).toHaveLength(1);
+    expect(getStatus().reorgs).toHaveLength(3);
+    expect(getStatus().reorgs.every((r) => r.depth === 3)).toBe(true);
     expect(mockSendMail).toHaveBeenCalledTimes(3);
     const recipients = mockSendMail.mock.calls.map((c) => (c[0] as { to: string }).to).sort();
     expect(recipients).toEqual(['min1@example.com', 'min3@example.com', 'none@example.com']);

@@ -11,13 +11,16 @@ export type ReorgEvent = {
   old_header_hash: string;
   new_header_hash: string;
   detected_at: string;
+  /** Number of consecutive heights rewritten in the same poll (true re-org depth). */
+  depth: number;
+  /** Distance from the peak height observed when this re-org was detected. Informational. */
   blocks_from_peak: number;
   old_block_record: unknown;
 };
 
 export type AlertRecipient = {
   email: string;
-  min_blocks: number; // only alert if blocks_from_peak >= min_blocks
+  min_blocks: number; // only alert if depth >= min_blocks
 };
 
 export type MonitorStatus = {
@@ -88,35 +91,82 @@ export async function _pollOnce(): Promise<void> {
     state.last_poll_at = new Date().toISOString();
     state.last_error = null;
 
-    const checkFrom = Math.max(0, peak - state.lookback_blocks + 1);
-    const { block_records } = await get_block_records(agent, { start: checkFrom, end: peak + 1 });
+    let lowestFetched = Math.max(0, peak - state.lookback_blocks + 1);
+    const initial = await get_block_records(agent, { start: lowestFetched, end: peak + 1 });
     if (generation !== state.generation) return;
+    let allRecords = initial.block_records ?? [];
 
-    const reorgsThisPoll: ReorgEvent[] = [];
-    for (const block of block_records ?? []) {
+    // Walk-back: if the deepest fetched height shows a hash change, the re-org
+    // may extend below the lookback window. Keep fetching earlier chunks until
+    // we find a height that's still canonical, hit genesis, or run out of
+    // prior observations to compare against. Without this, a re-org deeper
+    // than lookback_blocks is silently under-reported.
+    while (lowestFetched > 0) {
+      const lowestRec = allRecords.find((r) => r.height === lowestFetched);
+      if (lowestRec === undefined) break;
+      const prev = state.observations.get(lowestFetched);
+      if (prev === undefined) break;
+      const currentHash = stripHexPrefix(lowestRec.header_hash).toLowerCase();
+      if (prev.hash === currentHash) break;
+
+      const newLowest = Math.max(0, lowestFetched - state.lookback_blocks);
+      if (newLowest === lowestFetched) break;
+      const more = await get_block_records(agent, { start: newLowest, end: lowestFetched });
+      if (generation !== state.generation) return;
+      const moreRecords = more.block_records ?? [];
+      if (moreRecords.length === 0) break;
+      allRecords = [...moreRecords, ...allRecords];
+      lowestFetched = newLowest;
+    }
+
+    // First pass: collect all changed heights in this poll. We don't push the
+    // ReorgEvents to state yet because each one's depth depends on how many of
+    // its consecutive neighbors also changed.
+    type RawReorg = Omit<ReorgEvent, 'depth'>;
+    const rawReorgs: RawReorg[] = [];
+    for (const block of allRecords) {
       const currentHash = stripHexPrefix(block.header_hash).toLowerCase();
       const prev = state.observations.get(block.height);
       if (prev !== undefined && prev.hash !== currentHash) {
-        const reorg: ReorgEvent = {
+        rawReorgs.push({
           height: block.height,
           old_header_hash: prev.hash,
           new_header_hash: currentHash,
           detected_at: new Date().toISOString(),
           blocks_from_peak: peak - block.height,
           old_block_record: prev.record,
-        };
-        state.reorgs.push(reorg);
-        reorgsThisPoll.push(reorg);
-        log('warn', 'Re-org detected', {
-          network: state.network,
-          height: reorg.height,
-          depth: reorg.blocks_from_peak,
-          old_header_hash: reorg.old_header_hash,
-          new_header_hash: reorg.new_header_hash,
-          peak_height: peak,
         });
       }
       state.observations.set(block.height, { hash: currentHash, record: block });
+    }
+
+    // Group consecutive heights into clusters; each cluster is one logical
+    // re-org event and its size is the true depth. A poll could legitimately
+    // observe two disjoint re-orgs (rare), so we cluster by gaps.
+    rawReorgs.sort((a, b) => a.height - b.height);
+    const reorgsThisPoll: ReorgEvent[] = [];
+    let clusterStart = 0;
+    for (let i = 1; i <= rawReorgs.length; i++) {
+      const breakHere =
+        i === rawReorgs.length || rawReorgs[i]!.height !== rawReorgs[i - 1]!.height + 1;
+      if (breakHere) {
+        const depth = i - clusterStart;
+        for (let j = clusterStart; j < i; j++) {
+          const event: ReorgEvent = { ...rawReorgs[j]!, depth };
+          state.reorgs.push(event);
+          reorgsThisPoll.push(event);
+          log('warn', 'Re-org detected', {
+            network: state.network,
+            height: event.height,
+            depth: event.depth,
+            blocks_from_peak: event.blocks_from_peak,
+            old_header_hash: event.old_header_hash,
+            new_header_hash: event.new_header_hash,
+            peak_height: peak,
+          });
+        }
+        clusterStart = i;
+      }
     }
 
     // Debounce: only alert on (height, new_hash) pairs we haven't already seen this session.
@@ -129,8 +179,9 @@ export async function _pollOnce(): Promise<void> {
     });
 
     // Send one batched email per recipient containing all eligible reorgs from this poll.
+    // Filter on depth (true re-org cascade size), NOT blocks_from_peak.
     for (const recipient of state.alert_recipients) {
-      const eligible = newReorgsForAlert.filter((r) => r.blocks_from_peak >= recipient.min_blocks);
+      const eligible = newReorgsForAlert.filter((r) => r.depth >= recipient.min_blocks);
       if (eligible.length > 0) {
         log('info', 'Dispatching re-org alert', {
           to: recipient.email,
@@ -145,7 +196,7 @@ export async function _pollOnce(): Promise<void> {
         log('info', 'Skipping recipient (threshold not met)', {
           to: recipient.email,
           min_blocks: recipient.min_blocks,
-          available_depths: newReorgsForAlert.map((r) => r.blocks_from_peak),
+          available_depths: newReorgsForAlert.map((r) => r.depth),
         });
       }
     }

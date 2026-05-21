@@ -68,17 +68,23 @@ export async function sendReorgAlert(
 
   // Descending by height: closest to peak first.
   const sorted = [...reorgs].sort((a, b) => b.height - a.height);
-  const count = sorted.length;
-  // Walk the descending array: each entry should be exactly one above the next.
-  const consecutive = sorted.every(
-    (r, i) => i === sorted.length - 1 || r.height === sorted[i + 1]!.height + 1
-  );
 
-  const subject = `Re-org of ${count} block${count === 1 ? '' : 's'} detected on Chia ${network}`;
+  // Count distinct clusters: a gap in consecutive heights starts a new cluster.
+  let clusterCount = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (i === 0 || sorted[i]!.height !== sorted[i - 1]!.height - 1) clusterCount++;
+  }
+  const maxDepth = sorted.reduce((m, r) => Math.max(m, r.depth), 0);
 
-  const intro = consecutive
-    ? `A ${count}-block re-org was detected on the Chia ${network} blockchain.`
-    : `${count} re-orgs were detected on the Chia ${network} blockchain.`;
+  const subject =
+    clusterCount === 1
+      ? `Re-org of depth ${maxDepth} detected on Chia ${network}`
+      : `${clusterCount} re-orgs detected on Chia ${network} (max depth ${maxDepth})`;
+
+  const intro =
+    clusterCount === 1
+      ? `A re-org of depth ${maxDepth} was detected on the Chia ${network} blockchain.`
+      : `${clusterCount} re-orgs were detected on the Chia ${network} blockchain (max depth ${maxDepth}).`;
 
   const blockSections = sorted
     .map((reorg, i) => {
@@ -89,11 +95,12 @@ export async function sendReorgAlert(
       return [
         `Block ${i + 1}:`,
         ``,
-        `  Height:    ${reorg.height}`,
-        `  Old hash:  ${reorg.old_header_hash}`,
-        `  New hash:  ${reorg.new_header_hash}`,
-        `  Depth:     ${reorg.blocks_from_peak} block(s) from current peak`,
-        `  Detected:  ${reorg.detected_at}`,
+        `  Height:       ${reorg.height}`,
+        `  Old hash:     ${reorg.old_header_hash}`,
+        `  New hash:     ${reorg.new_header_hash}`,
+        `  Depth:        ${reorg.depth} block(s) (size of the re-org cascade)`,
+        `  Behind peak:  ${reorg.blocks_from_peak} block(s) from current peak (how long ago)`,
+        `  Detected:     ${reorg.detected_at}`,
         ``,
         `  The original block was a ${(reorg.old_block_record as { timestamp?: unknown }).timestamp != null ? 'tx' : 'non-tx'} block with the following contents:`,
         recordJson,
@@ -118,7 +125,8 @@ export async function sendReorgAlert(
     from,
     subject,
     network,
-    reorg_count: count,
+    cluster_count: clusterCount,
+    max_depth: maxDepth,
     peak_height: peakHeight,
     reorg_heights: sorted.map((r) => r.height),
   });
