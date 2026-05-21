@@ -40,7 +40,7 @@ if (-not (Test-Path $SmtpEnvFile)) {
 
 $arguments = @(
   '"' + $entry + '"',
-  'monitor',
+  'reorg_monitor',
   '--network', $Network,
   '--recipient', $Recipient,
   '--smtp-env-file', '"' + $SmtpEnvFile + '"'

@@ -122,7 +122,7 @@ export class HelpRequested extends Error {
   }
 }
 
-const HELP_TEXT = `Usage: chia-explorer monitor [options]
+const HELP_TEXT = `Usage: chia-explorer reorg_monitor [options]
 
 Run the re-org monitor as a long-running CLI process. Logs status snapshots,
 re-org events, and outgoing email contents to a log file (and mirrors them to
@@ -145,7 +145,7 @@ Options:
 Email alerts require SMTP_HOST; see README for full SMTP env var list.
 `;
 
-export async function runMonitorCli(argv: readonly string[]): Promise<number> {
+export async function runReorgMonitorCli(argv: readonly string[]): Promise<number> {
   let args: ParsedArgs;
   try {
     args = parseArgs(argv);

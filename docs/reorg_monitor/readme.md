@@ -9,7 +9,7 @@ Start it with `start_reorg_monitor`, read results with `get_reorg_monitor_status
 The same monitor can run as a long-running CLI process — useful when you want it up independently of an MCP host:
 
 ```bash
-chia-explorer monitor \
+chia-explorer reorg_monitor \
   --network mainnet \
   --poll-interval 10 \
   --lookback 5 \
@@ -18,7 +18,7 @@ chia-explorer monitor \
   --status-every 60
 ```
 
-All flags are optional. Status snapshots, re-org events, and the full contents and metadata of every outgoing alert email are written to `~/logs/reorg_monitor.log` (configurable with `--log-file <path>` or disabled with `--no-log-file`) and mirrored to stderr. `Ctrl-C` (SIGINT) or SIGTERM stops the monitor cleanly. Run `chia-explorer monitor --help` for the full flag reference. Email alerts use the same SMTP env vars as the MCP tool (see below).
+All flags are optional. Status snapshots, re-org events, and the full contents and metadata of every outgoing alert email are written to `~/logs/reorg_monitor.log` (configurable with `--log-file <path>` or disabled with `--no-log-file`) and mirrored to stderr. `Ctrl-C` (SIGINT) or SIGTERM stops the monitor cleanly. Run `chia-explorer reorg_monitor --help` for the full flag reference. Email alerts use the same SMTP env vars as the MCP tool (see below).
 
 You can pass `--smtp-env-file <path>` to load the SMTP variables from a dotenv-style file (`KEY=VALUE` per line, `#` comments and quoted values supported) instead of exporting them in your shell. Shell-exported variables take precedence, so the file is a fallback rather than an override. The file contains secrets, so `chmod 600` it.
 
@@ -71,7 +71,7 @@ nssm stop   ChiaReorgMonitor
 nssm remove ChiaReorgMonitor confirm
 ```
 
-The script installs an auto-start NSSM service running `node dist\index.js monitor` with your flags. Logs land in `%USERPROFILE%\logs\reorg_monitor.log` (the monitor) and `%USERPROFILE%\logs\reorg_monitor.nssm.err` (stderr captured by NSSM).
+The script installs an auto-start NSSM service running `node dist\index.js reorg_monitor` with your flags. Logs land in `%USERPROFILE%\logs\reorg_monitor.log` (the monitor) and `%USERPROFILE%\logs\reorg_monitor.nssm.err` (stderr captured by NSSM).
 
 ## Options
 

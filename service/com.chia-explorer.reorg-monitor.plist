@@ -36,7 +36,7 @@
   <array>
     <string><node-bin></string>
     <string><install-path>/dist/index.js</string>
-    <string>monitor</string>
+    <string>reorg_monitor</string>
     <string>--network</string>
     <string>mainnet</string>
     <string>--recipient</string>

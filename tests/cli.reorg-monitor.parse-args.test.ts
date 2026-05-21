@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HelpRequested, parseArgs } from '../src/cli/monitor.js';
+import { HelpRequested, parseArgs } from '../src/cli/reorg-monitor.js';
 
 describe('cli monitor parseArgs', () => {
   it('returns defaults when no flags are passed', () => {

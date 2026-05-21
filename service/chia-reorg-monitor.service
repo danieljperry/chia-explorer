@@ -30,7 +30,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=<node-bin> <install-path>/dist/index.js monitor \
+ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
   --network mainnet \
   --recipient you@example.com:1 \
   --smtp-env-file <smtp-env-file>

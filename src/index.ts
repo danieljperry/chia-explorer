@@ -4,9 +4,9 @@ import { createServer } from './server.js';
 
 const [, , subcommand, ...rest] = process.argv;
 
-if (subcommand === 'monitor') {
-  const { runMonitorCli } = await import('./cli/monitor.js');
-  const code = await runMonitorCli(rest);
+if (subcommand === 'reorg_monitor') {
+  const { runReorgMonitorCli } = await import('./cli/reorg-monitor.js');
+  const code = await runReorgMonitorCli(rest);
   process.exit(code);
 }
 
