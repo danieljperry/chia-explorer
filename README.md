@@ -215,6 +215,11 @@ Skills are read-only and idempotent, persist state between runs, and accept stru
 | `estimate_fee` | Recommended mojo fee for inclusion in 1/5/15 minutes (configurable target_times + spend_type bias) |
 | `address_to_puzzle_hash` | bech32m decode — no RPC |
 | `puzzle_hash_to_address` | bech32m encode — no RPC |
+| `check_block_canonical` | Re-fetch a height and compare against an expected header hash |
+| `scan_chain_consistency` | Walk a height range and report any non-canonical blocks |
+| `start_reorg_monitor` | Start a background poller that detects re-orgs in real time |
+| `stop_reorg_monitor` | Stop the background re-org monitor |
+| `get_reorg_monitor_status` | Current monitor status, peak height, and detected re-orgs |
 | `get_xch_price` | Current XCH spot price in one or more currencies (CoinGecko) |
 | `convert_xch_to_fiat` | Convert a mojo amount to fiat using the current XCH price |
 | `get_prefarm_status` | Live per-wallet balances of the 21M XCH strategic reserve, plus total spent |
@@ -226,6 +231,14 @@ Skills are read-only and idempotent, persist state between runs, and accept stru
 | `search_chips` | Keyword search across merged CHIPs and open PR drafts (title, description, abstract, authors) |
 
 Blockchain tools take an optional `network: "mainnet" | "testnet11"` (default `mainnet`). The price and CHIPs tools take no network arg. The prefarm tools are mainnet only.
+
+## Re-org monitor
+
+The re-org monitor is a background poller that watches the tip of the chain and detects re-orgs in real time. On each poll it fetches the last `lookback_blocks` heights and compares header hashes against what it saw previously — any hash change at a given height is a confirmed re-org.
+
+Start it with `start_reorg_monitor`, read results with `get_reorg_monitor_status`, and stop it with `stop_reorg_monitor`. Only one monitor runs at a time per server.
+
+See [`docs/reorg_monitor/readme.md`](docs/reorg_monitor/readme.md) for the standalone CLI, system-service install, configuration options, email alerts, and examples.
 
 ## Optional config
 

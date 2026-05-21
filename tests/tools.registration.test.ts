@@ -33,6 +33,11 @@ const EXPECTED_TOOLS = [
   'get_chip',
   'list_chip_drafts',
   'search_chips',
+  'check_block_canonical',
+  'scan_chain_consistency',
+  'start_reorg_monitor',
+  'get_reorg_monitor_status',
+  'stop_reorg_monitor',
 ];
 
 describe('tool registration', () => {

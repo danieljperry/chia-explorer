@@ -8,6 +8,9 @@ import { register as registerGetBlockByHeight } from './tools/blockchain/get-blo
 import { register as registerGetBlockByHash } from './tools/blockchain/get-block-by-hash.js';
 import { register as registerCountBlockTransactions } from './tools/blockchain/count-block-transactions.js';
 import { register as registerGetBlockAdditionsAndRemovals } from './tools/blockchain/get-block-additions-and-removals.js';
+import { register as registerCheckBlockCanonical } from './tools/blockchain/check-block-canonical.js';
+import { register as registerScanChainConsistency } from './tools/blockchain/scan-chain-consistency.js';
+import { register as registerReorgMonitor } from './tools/blockchain/reorg-monitor.js';
 
 import { register as registerGetBalance } from './tools/coins/get-balance.js';
 import { register as registerGetCoinRecordsByPuzzleHash } from './tools/coins/get-coin-records-by-puzzle-hash.js';
@@ -67,6 +70,9 @@ export function createServer(): McpServer {
   registerGetBlockByHash(server);
   registerCountBlockTransactions(server);
   registerGetBlockAdditionsAndRemovals(server);
+  registerCheckBlockCanonical(server);
+  registerScanChainConsistency(server);
+  registerReorgMonitor(server);
 
   registerGetBalance(server);
   registerGetCoinRecordsByPuzzleHash(server);
