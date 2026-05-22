@@ -44,7 +44,7 @@ const state = {
   active: false,
   network: 'mainnet' as Network,
   started_at: null as string | null,
-  poll_interval_seconds: 10,
+  poll_interval_seconds: 5,
   lookback_blocks: 5,
   alert_recipients: [] as AlertRecipient[],
   poll_count: 0,
@@ -86,6 +86,8 @@ export async function _pollOnce(): Promise<void> {
     const { blockchain_state } = result;
     const peak = blockchain_state.peak?.height;
     if (peak === undefined) return;
+    const prevPeak = state.peak_height; // captured before update; used for the
+    // "depth is a lower bound" warning when skipped polls leave a gap in observations.
     state.peak_height = peak;
     state.poll_count++;
     state.last_poll_at = new Date().toISOString();
@@ -167,6 +169,24 @@ export async function _pollOnce(): Promise<void> {
         }
         clusterStart = i;
       }
+    }
+
+    // If we detected a re-org whose top reaches our previous peak AND the
+    // chain advanced beyond it, the actual cascade may have extended into
+    // heights we never observed (and have no baseline for). The reported
+    // depth is then a lower bound, not authoritative. Flag it.
+    if (
+      reorgsThisPoll.length > 0 &&
+      prevPeak !== null &&
+      peak > prevPeak &&
+      reorgsThisPoll.some((r) => r.height === prevPeak)
+    ) {
+      log('warn', 'Re-org depth may be a lower bound (chain advanced into unobserved territory)', {
+        network: state.network,
+        unobserved_range: `${prevPeak + 1}..${peak}`,
+        unobserved_blocks: peak - prevPeak,
+        observed_depths: reorgsThisPoll.map((r) => r.depth),
+      });
     }
 
     // Debounce: only alert on (height, new_hash) pairs we haven't already seen this session.

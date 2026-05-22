@@ -76,7 +76,7 @@ The script installs an auto-start NSSM service running `node dist\index.js reorg
 ## Options
 
 - `network` — `mainnet` (default) or `testnet11`
-- `poll_interval_seconds` — 5–60 (default 10)
+- `poll_interval_seconds` — 5–60 (default 5)
 - `lookback_blocks` — 1–32 (default 5); how many recent heights to re-check each poll
 - `alert_recipients` — (optional, disabled by default) Add up to 10 email addresses, each with an optional `min_blocks` threshold (default 1). An address only receives an alert when the re-org depth meets or exceeds its threshold. Duplicates are collapsed.
 

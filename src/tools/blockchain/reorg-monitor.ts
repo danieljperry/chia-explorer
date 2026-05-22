@@ -20,8 +20,8 @@ export function register(server: McpServer): void {
         .int()
         .min(5)
         .max(60)
-        .default(10)
-        .describe('Seconds between polls (5–60; default 10)'),
+        .default(5)
+        .describe('Seconds between polls (5–60; default 5)'),
       lookback_blocks: z
         .number()
         .int()

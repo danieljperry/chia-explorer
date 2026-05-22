@@ -7,7 +7,7 @@ describe('cli monitor parseArgs', () => {
   it('returns defaults when no flags are passed', () => {
     expect(parseArgs([])).toEqual({
       network: 'mainnet',
-      pollIntervalSeconds: 10,
+      pollIntervalSeconds: 5,
       lookbackBlocks: 5,
       statusEverySeconds: 60,
       recipients: [],

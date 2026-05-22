@@ -26,7 +26,7 @@ const DEFAULT_LOG_FILE = join(homedir(), 'logs', 'reorg_monitor.log');
 
 const DEFAULTS = {
   network: 'mainnet' as Network,
-  pollIntervalSeconds: 10,
+  pollIntervalSeconds: 5,
   lookbackBlocks: 5,
   statusEverySeconds: 60,
 };
@@ -130,7 +130,7 @@ stderr). Send SIGINT (Ctrl-C) to stop.
 
 Options:
   --network <mainnet|testnet11>   Network to monitor (default: mainnet)
-  --poll-interval <seconds>       Seconds between polls, 5–60 (default: 10)
+  --poll-interval <seconds>       Seconds between polls, 5–60 (default: 5)
   --lookback <blocks>             Heights to re-check per poll, 1–32 (default: 5)
   --status-every <seconds>        How often to log a status snapshot (default: 60)
   --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.

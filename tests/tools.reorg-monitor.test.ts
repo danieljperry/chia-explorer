@@ -740,6 +740,94 @@ describe('reorg monitor detection logic', () => {
     ]);
   });
 
+  it('warns when the chain advanced past our last observed peak during a re-org', async () => {
+    // prev_peak = 100, then chain advances to 103 with a re-org touching height 100.
+    // Heights 101..103 are new to us — they may or may not be part of the cascade.
+    // Reported depth=1 is a lower bound; the warning surfaces that ambiguity.
+    const { setLogFile, closeLogger } = await import('../src/util/logger.js');
+    const dir = mkdtempSync(join(tmpdir(), 'reorg-monitor-warn-test-'));
+    const logPath = join(dir, 'monitor.log');
+    try {
+      await setLogFile(logPath);
+      startMonitor({ poll_interval_seconds: 60, lookback_blocks: 5, network: 'mainnet' });
+      stopMonitor();
+
+      // Establish observations 96..100 with prev_peak = 100.
+      mockPeak(100, 'a'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(96, 'p'.repeat(64)),
+        makeBlockRecord(97, 'q'.repeat(64)),
+        makeBlockRecord(98, 'r'.repeat(64)),
+        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(100, 'a'.repeat(64)),
+      ]);
+      await _pollOnce();
+
+      // Chain advanced 3 blocks (during simulated skips) AND height 100 was re-orged.
+      mockPeak(103, 'd'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(99, 's'.repeat(64)), // unchanged
+        makeBlockRecord(100, 'REORG'.padEnd(64, '0')), // changed → cluster_high = 100 = prev_peak
+        makeBlockRecord(101, 'b'.repeat(64)), // new
+        makeBlockRecord(102, 'c'.repeat(64)), // new
+        makeBlockRecord(103, 'd'.repeat(64)), // new
+      ]);
+      await _pollOnce();
+      await closeLogger();
+
+      const contents = readFileSync(logPath, 'utf8');
+      expect(contents).toContain(
+        'Re-org depth may be a lower bound (chain advanced into unobserved territory)'
+      );
+      expect(contents).toContain('unobserved_range=101..103');
+      expect(contents).toContain('unobserved_blocks=3');
+    } finally {
+      await closeLogger();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT warn when the chain stayed at the same peak during a re-org', async () => {
+    // Re-org swaps blocks at heights 99..100 but new tip is still at 100.
+    // No unobserved territory → depth=2 is authoritative, no warning.
+    const { setLogFile, closeLogger } = await import('../src/util/logger.js');
+    const dir = mkdtempSync(join(tmpdir(), 'reorg-monitor-no-warn-test-'));
+    const logPath = join(dir, 'monitor.log');
+    try {
+      await setLogFile(logPath);
+      startMonitor({ poll_interval_seconds: 60, lookback_blocks: 5, network: 'mainnet' });
+      stopMonitor();
+
+      mockPeak(100, 'a'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(96, 'p'.repeat(64)),
+        makeBlockRecord(97, 'q'.repeat(64)),
+        makeBlockRecord(98, 'r'.repeat(64)),
+        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(100, 'a'.repeat(64)),
+      ]);
+      await _pollOnce();
+
+      // Same peak height, but heights 99 and 100 got new hashes (block swap).
+      mockPeak(100, 'A'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(96, 'p'.repeat(64)),
+        makeBlockRecord(97, 'q'.repeat(64)),
+        makeBlockRecord(98, 'r'.repeat(64)),
+        makeBlockRecord(99, 'S'.repeat(64)),
+        makeBlockRecord(100, 'A'.repeat(64)),
+      ]);
+      await _pollOnce();
+      await closeLogger();
+
+      const contents = readFileSync(logPath, 'utf8');
+      expect(contents).not.toContain('Re-org depth may be a lower bound');
+    } finally {
+      await closeLogger();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sends only to recipients whose threshold is met', async () => {
     // depth = peak(101) - reorged_height(99) = 2; low(min 1) gets it, high(min 3) does not
     startMonitor({
