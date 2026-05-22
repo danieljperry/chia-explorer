@@ -787,6 +787,153 @@ describe('reorg monitor detection logic', () => {
     }
   });
 
+  it('warns even when the chain advance happened across SKIPPED polls (not just one)', async () => {
+    // Regression: skipped polls used to update state.peak_height too, which
+    // polluted the warning's notion of "previous peak" and suppressed it in
+    // exactly the case it was meant to fire.
+    const { setLogFile, closeLogger } = await import('../src/util/logger.js');
+    const dir = mkdtempSync(join(tmpdir(), 'reorg-monitor-skip-warn-test-'));
+    const logPath = join(dir, 'monitor.log');
+    try {
+      await setLogFile(logPath);
+      startMonitor({ poll_interval_seconds: 60, lookback_blocks: 5, network: 'mainnet' });
+      stopMonitor();
+
+      // Poll 1: successful, observe 96..100.
+      mockPeak(100, 'a'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(96, 'p'.repeat(64)),
+        makeBlockRecord(97, 'q'.repeat(64)),
+        makeBlockRecord(98, 'r'.repeat(64)),
+        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(100, 'a'.repeat(64)),
+      ]);
+      await _pollOnce();
+
+      // Poll 2: chain advanced to 102 but get_block_records throws the tip-race
+      // error. state.peak_height becomes 102; last_observed_peak should NOT.
+      mockPeak(102, 'b'.repeat(64));
+      const raceError: unknown = {
+        structuredError: { code: 'BLOCK_DOES_NOT_EXIST' },
+      };
+      mocks.get_block_records.mockRejectedValueOnce(raceError);
+      await _pollOnce();
+
+      // Poll 3: successful. Chain now at peak=103. Height 100 was re-orged.
+      // The warning must fire even though state.peak_height was already 102.
+      mockPeak(103, 'c'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(99, 's'.repeat(64)), // unchanged
+        makeBlockRecord(100, 'REORG'.padEnd(64, '0')), // changed
+        makeBlockRecord(101, 'x'.repeat(64)), // new
+        makeBlockRecord(102, 'y'.repeat(64)), // new
+        makeBlockRecord(103, 'c'.repeat(64)), // new
+      ]);
+      await _pollOnce();
+      await closeLogger();
+
+      const contents = readFileSync(logPath, 'utf8');
+      expect(contents).toContain(
+        'Re-org depth may be a lower bound (chain advanced into unobserved territory)'
+      );
+      expect(contents).toContain('unobserved_range=101..103');
+      expect(contents).toContain('unobserved_blocks=3');
+    } finally {
+      await closeLogger();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('worst-case dispatch: uncertain depth alerts every recipient whose threshold ≤ max_depth', async () => {
+    // Scenario from the user's instruction: a re-org with depth 1, but the chain
+    // advanced 3 blocks during the re-org window so the true depth could be 1-4.
+    // Anyone with min_blocks ≤ 4 must get an email; anyone with min_blocks ≥ 5 must not.
+    // The log line and email subject must both express the "1-4" range.
+    const { setLogFile, closeLogger } = await import('../src/util/logger.js');
+    const dir = mkdtempSync(join(tmpdir(), 'reorg-worst-case-test-'));
+    const logPath = join(dir, 'monitor.log');
+    try {
+      await setLogFile(logPath);
+      startMonitor({
+        poll_interval_seconds: 60,
+        lookback_blocks: 5,
+        network: 'mainnet',
+        alert_recipients: [
+          { email: 'r1@example.com', min_blocks: 1 }, // should alert (1 ≤ 4)
+          { email: 'r2@example.com', min_blocks: 2 }, // should alert (2 ≤ 4)
+          { email: 'r3@example.com', min_blocks: 3 }, // should alert (3 ≤ 4)
+          { email: 'r4@example.com', min_blocks: 4 }, // should alert (4 ≤ 4)
+          { email: 'r5@example.com', min_blocks: 5 }, // should NOT alert (5 > 4)
+          { email: 'r6@example.com', min_blocks: 8 }, // should NOT alert (8 > 4)
+        ],
+      });
+      stopMonitor();
+
+      // Poll 1: peak=100, observe 96..100. last_observed_peak = 100.
+      mockPeak(100, 'a'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(96, 'p'.repeat(64)),
+        makeBlockRecord(97, 'q'.repeat(64)),
+        makeBlockRecord(98, 'r'.repeat(64)),
+        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(100, 'a'.repeat(64)),
+      ]);
+      await _pollOnce();
+
+      // Poll 2: chain has advanced to 103 (peak += 3) AND height 100 was re-orged.
+      // Observed cluster size = 1 (height 100). Heights 101..103 are unobserved.
+      // True depth could be 1, 2, 3, or 4 → max_depth = 1 + 3 = 4.
+      mockPeak(103, 'd'.repeat(64));
+      mockBlockRecords([
+        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+        makeBlockRecord(101, 'b'.repeat(64)),
+        makeBlockRecord(102, 'c'.repeat(64)),
+        makeBlockRecord(103, 'd'.repeat(64)),
+      ]);
+      await _pollOnce();
+      // Two `await Promise.resolve()` to flush sendReorgAlert promises.
+      await Promise.resolve();
+      await Promise.resolve();
+      await closeLogger();
+
+      // Recipient filter: exactly r1..r4 should have been emailed.
+      expect(mockSendMail).toHaveBeenCalledTimes(4);
+      const recipientsCalled = mockSendMail.mock.calls
+        .map((c) => (c[0] as { to: string }).to)
+        .sort();
+      expect(recipientsCalled).toEqual([
+        'r1@example.com',
+        'r2@example.com',
+        'r3@example.com',
+        'r4@example.com',
+      ]);
+
+      // Subject and intro must show the "1-4" range, not just "1".
+      const call = mockSendMail.mock.calls[0]![0] as { subject: string; text: string };
+      expect(call.subject).toBe('Re-org of depth 1-4 detected on Chia mainnet');
+      expect(call.text).toContain('A re-org of depth 1-4 was detected on the Chia mainnet');
+      expect(call.text).toContain('unobserved block(s) above the cascade');
+      // Per-block depth line spells out the range explicitly.
+      expect(call.text).toMatch(/Depth:\s+1-4 block\(s\)/);
+      expect(call.text).toContain('observed cascade is 1');
+      expect(call.text).toContain('up to 3 more block(s) above were never compared');
+
+      // Log line for "Re-org detected" must express the range.
+      const contents = readFileSync(logPath, 'utf8');
+      expect(contents).toMatch(/Re-org detected.*depth=1-4/);
+
+      // ReorgEvent on getStatus() carries both bounds.
+      const reorgs = getStatus().reorgs;
+      expect(reorgs).toHaveLength(1);
+      expect(reorgs[0]!.depth).toBe(1);
+      expect(reorgs[0]!.max_depth).toBe(4);
+    } finally {
+      await closeLogger();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does NOT warn when the chain stayed at the same peak during a re-org', async () => {
     // Re-org swaps blocks at heights 99..100 but new tip is still at 100.
     // No unobserved territory → depth=2 is authoritative, no warning.
@@ -1062,7 +1209,9 @@ describe('reorg monitor detection logic', () => {
     const call = mockSendMail.mock.calls[0]![0] as { subject: string; text: string };
 
     // Consecutive heights 200 and 201 → batched as a single 2-block reorg.
-    expect(call.subject).toBe('Re-org of depth 2 detected on Chia mainnet');
+    // Chain advanced to 202 during the re-org, so depth is a range (2-3) —
+    // height 202 is unobserved territory that could be part of the cascade.
+    expect(call.subject).toBe('Re-org of depth 2-3 detected on Chia mainnet');
     expect(call.text).toContain('Block 1:');
     expect(call.text).toContain('Block 2:');
 
@@ -1116,7 +1265,11 @@ describe('reorg monitor detection logic', () => {
     await Promise.resolve();
 
     const call = mockSendMail.mock.calls[0]![0] as { text: string };
-    expect(call.text).toContain('A re-org of depth 2 was detected on the Chia mainnet blockchain.');
+    // Chain advanced from 100 to 101 during the re-org, so depth is a range
+    // (2 observed, possibly up to 3 if height 101 is also part of the cascade).
+    expect(call.text).toContain(
+      'A re-org of depth 2-3 was detected on the Chia mainnet blockchain'
+    );
   });
 
   it('email body opens with the non-consecutive intro when blocks are not adjacent', async () => {

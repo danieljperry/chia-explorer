@@ -11,16 +11,20 @@ export type ReorgEvent = {
   old_header_hash: string;
   new_header_hash: string;
   detected_at: string;
-  /** Number of consecutive heights rewritten in the same poll (true re-org depth). */
+  /** Lower bound on depth: consecutive observed heights with hash changes. */
   depth: number;
-  /** Distance from the peak height observed when this re-org was detected. Informational. */
+  /** Upper bound on depth: depth + unobserved blocks above the cluster when the
+   * chain advanced past our last fully-observed peak. Equal to depth when we
+   * have complete information. The alert filter uses this (worst-case). */
+  max_depth: number;
+  /** Distance from the peak height observed when this re-org was detected. */
   blocks_from_peak: number;
   old_block_record: unknown;
 };
 
 export type AlertRecipient = {
   email: string;
-  min_blocks: number; // only alert if depth >= min_blocks
+  min_blocks: number; // only alert if max_depth >= min_blocks (worst-case)
 };
 
 export type MonitorStatus = {
@@ -49,6 +53,11 @@ const state = {
   alert_recipients: [] as AlertRecipient[],
   poll_count: 0,
   peak_height: null as number | null,
+  // Highest peak from the last poll where we actually completed the comparison
+  // loop (i.e., not just announced by get_blockchain_state but also retrieved
+  // and processed via get_block_records). Used by the "lower bound" warning so
+  // skipped polls don't pollute it.
+  last_observed_peak: null as number | null,
   last_poll_at: null as string | null,
   last_error: null as string | null,
   reorgs: [] as ReorgEvent[],
@@ -86,8 +95,11 @@ export async function _pollOnce(): Promise<void> {
     const { blockchain_state } = result;
     const peak = blockchain_state.peak?.height;
     if (peak === undefined) return;
-    const prevPeak = state.peak_height; // captured before update; used for the
-    // "depth is a lower bound" warning when skipped polls leave a gap in observations.
+    // Snapshot the highest peak from a prior FULLY successful poll. We use this
+    // (not state.peak_height) for the "lower bound" warning, because
+    // state.peak_height is updated even on skipped polls and would suppress
+    // the warning in exactly the case it's meant to fire.
+    const prevObservedPeak = state.last_observed_peak;
     state.peak_height = peak;
     state.poll_count++;
     state.last_poll_at = new Date().toISOString();
@@ -124,7 +136,7 @@ export async function _pollOnce(): Promise<void> {
     // First pass: collect all changed heights in this poll. We don't push the
     // ReorgEvents to state yet because each one's depth depends on how many of
     // its consecutive neighbors also changed.
-    type RawReorg = Omit<ReorgEvent, 'depth'>;
+    type RawReorg = Omit<ReorgEvent, 'depth' | 'max_depth'>;
     const rawReorgs: RawReorg[] = [];
     for (const block of allRecords) {
       const currentHash = stripHexPrefix(block.header_hash).toLowerCase();
@@ -143,8 +155,9 @@ export async function _pollOnce(): Promise<void> {
     }
 
     // Group consecutive heights into clusters; each cluster is one logical
-    // re-org event and its size is the true depth. A poll could legitimately
-    // observe two disjoint re-orgs (rare), so we cluster by gaps.
+    // re-org event. depth = observed cluster size (lower bound). max_depth =
+    // worst-case true depth, which includes any unobserved heights above the
+    // cluster if it reaches our last fully-observed peak.
     rawReorgs.sort((a, b) => a.height - b.height);
     const reorgsThisPoll: ReorgEvent[] = [];
     let clusterStart = 0;
@@ -153,14 +166,23 @@ export async function _pollOnce(): Promise<void> {
         i === rawReorgs.length || rawReorgs[i]!.height !== rawReorgs[i - 1]!.height + 1;
       if (breakHere) {
         const depth = i - clusterStart;
+        const clusterHigh = rawReorgs[i - 1]!.height;
+        const unobservedAbove =
+          prevObservedPeak !== null && clusterHigh === prevObservedPeak && peak > prevObservedPeak
+            ? peak - prevObservedPeak
+            : 0;
+        const max_depth = depth + unobservedAbove;
         for (let j = clusterStart; j < i; j++) {
-          const event: ReorgEvent = { ...rawReorgs[j]!, depth };
+          const event: ReorgEvent = { ...rawReorgs[j]!, depth, max_depth };
           state.reorgs.push(event);
           reorgsThisPoll.push(event);
           log('warn', 'Re-org detected', {
             network: state.network,
             height: event.height,
-            depth: event.depth,
+            depth:
+              event.depth === event.max_depth
+                ? `${event.depth}`
+                : `${event.depth}-${event.max_depth}`,
             blocks_from_peak: event.blocks_from_peak,
             old_header_hash: event.old_header_hash,
             new_header_hash: event.new_header_hash,
@@ -171,20 +193,25 @@ export async function _pollOnce(): Promise<void> {
       }
     }
 
-    // If we detected a re-org whose top reaches our previous peak AND the
-    // chain advanced beyond it, the actual cascade may have extended into
-    // heights we never observed (and have no baseline for). The reported
-    // depth is then a lower bound, not authoritative. Flag it.
+    // Update the "last fully observed peak" now that we've made it through
+    // the comparison loop. Skipped polls (which throw out of the try block
+    // before reaching here) don't advance this — that's the whole point.
+    state.last_observed_peak = peak;
+
+    // If we detected a re-org whose top reaches our previous *observed* peak
+    // AND the chain has advanced beyond it, the actual cascade may have
+    // extended into heights we never observed (no baseline to compare). The
+    // reported depth is then a lower bound, not authoritative. Flag it.
     if (
       reorgsThisPoll.length > 0 &&
-      prevPeak !== null &&
-      peak > prevPeak &&
-      reorgsThisPoll.some((r) => r.height === prevPeak)
+      prevObservedPeak !== null &&
+      peak > prevObservedPeak &&
+      reorgsThisPoll.some((r) => r.height === prevObservedPeak)
     ) {
       log('warn', 'Re-org depth may be a lower bound (chain advanced into unobserved territory)', {
         network: state.network,
-        unobserved_range: `${prevPeak + 1}..${peak}`,
-        unobserved_blocks: peak - prevPeak,
+        unobserved_range: `${prevObservedPeak + 1}..${peak}`,
+        unobserved_blocks: peak - prevObservedPeak,
         observed_depths: reorgsThisPoll.map((r) => r.depth),
       });
     }
@@ -199,15 +226,19 @@ export async function _pollOnce(): Promise<void> {
     });
 
     // Send one batched email per recipient containing all eligible reorgs from this poll.
-    // Filter on depth (true re-org cascade size), NOT blocks_from_peak.
+    // Filter on max_depth (worst-case true depth) so a re-org with uncertain
+    // depth still alerts everyone whose threshold could be met. Honest by default.
     for (const recipient of state.alert_recipients) {
-      const eligible = newReorgsForAlert.filter((r) => r.depth >= recipient.min_blocks);
+      const eligible = newReorgsForAlert.filter((r) => r.max_depth >= recipient.min_blocks);
       if (eligible.length > 0) {
         log('info', 'Dispatching re-org alert', {
           to: recipient.email,
           min_blocks: recipient.min_blocks,
           eligible_count: eligible.length,
           eligible_heights: eligible.map((r) => r.height),
+          eligible_depth_ranges: eligible.map((r) =>
+            r.depth === r.max_depth ? `${r.depth}` : `${r.depth}-${r.max_depth}`
+          ),
         });
         sendReorgAlert(recipient.email, state.network, eligible, peak).catch((err: unknown) => {
           state.last_error = `Email alert failed: ${safeMessage(err)}`;
@@ -216,7 +247,7 @@ export async function _pollOnce(): Promise<void> {
         log('info', 'Skipping recipient (threshold not met)', {
           to: recipient.email,
           min_blocks: recipient.min_blocks,
-          available_depths: newReorgsForAlert.map((r) => r.depth),
+          available_max_depths: newReorgsForAlert.map((r) => r.max_depth),
         });
       }
     }
@@ -271,6 +302,7 @@ export function startMonitor(opts: {
   state.started_at = new Date().toISOString();
   state.poll_count = 0;
   state.peak_height = null;
+  state.last_observed_peak = null;
   state.last_poll_at = null;
   state.last_error = null;
   state.reorgs = [];
